@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.testng.Assert;
@@ -137,6 +138,67 @@ public class FsStateStoreTest {
     Assert.assertTrue(storeNames.size() == 2);
     Assert.assertEquals(storeNames.get(0), "testStore");
     Assert.assertEquals(storeNames.get(1), "testStore2");
+  }
+
+  @Test
+  public void testPutOverwritesExistingTable() throws IOException {
+    State state1 = new State();
+    state1.setId("s1");
+    state1.setProp("k1", "v1");
+    this.stateStore.put("testStore", "overwriteTestTable", state1);
+
+    State state2 = new State();
+    state2.setId("s2");
+    state2.setProp("k2", "v2");
+    this.stateStore.put("testStore", "overwriteTestTable", state2);
+
+    Assert.assertNull(this.stateStore.get("testStore", "overwriteTestTable", "s1"));
+    State retrieved = this.stateStore.get("testStore", "overwriteTestTable", "s2");
+    Assert.assertNotNull(retrieved);
+    Assert.assertEquals(retrieved.getProp("k2"), "v2");
+  }
+
+  @Test
+  public void testPutCleansUpLeftoverTmpFile() throws IOException {
+    FileSystem fs = FileSystem.getLocal(new Configuration(false));
+    Path storePath = new Path("metastore-test", "testStore");
+    Assert.assertTrue(fs.mkdirs(storePath) || fs.exists(storePath));
+    Path tmpTablePath = new Path(storePath, FsStateStore.TMP_FILE_PREFIX + "tmpCleanupTestTable");
+    try (FSDataOutputStream out = fs.create(tmpTablePath, true)) {
+      out.writeBytes("partially-written-garbage");
+    }
+    Assert.assertTrue(fs.exists(tmpTablePath));
+
+    State state = new State();
+    state.setId("s1");
+    state.setProp("k1", "v1");
+    this.stateStore.put("testStore", "tmpCleanupTestTable", state);
+
+    Assert.assertFalse(fs.exists(tmpTablePath));
+    State retrieved = this.stateStore.get("testStore", "tmpCleanupTestTable", "s1");
+    Assert.assertNotNull(retrieved);
+    Assert.assertEquals(retrieved.getProp("k1"), "v1");
+  }
+
+  @Test
+  public void testGetAllSkipsLeftoverTmpFiles() throws IOException {
+    FileSystem fs = FileSystem.getLocal(new Configuration(false));
+    Path storePath = new Path("metastore-test", "testStore");
+    Assert.assertTrue(fs.mkdirs(storePath) || fs.exists(storePath));
+    Path orphanTmpPath = new Path(storePath, FsStateStore.TMP_FILE_PREFIX + "orphanTmpTable");
+    try (FSDataOutputStream out = fs.create(orphanTmpPath, true)) {
+      out.writeBytes("partially-written-garbage");
+    }
+    try {
+      List<State> states = this.stateStore.getAll("testStore");
+      for (State state : states) {
+        Assert.assertFalse(state.getId().startsWith(FsStateStore.TMP_FILE_PREFIX));
+      }
+      Assert.assertFalse(this.stateStore.getTableNames("testStore", Predicates.alwaysTrue())
+          .contains(orphanTmpPath.getName()));
+    } finally {
+      fs.delete(orphanTmpPath, false);
+    }
   }
 
 //  Disable backwards compatibility change, since we are doing a major version upgrade

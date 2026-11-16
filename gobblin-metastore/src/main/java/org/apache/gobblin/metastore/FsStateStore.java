@@ -148,14 +148,19 @@ public class FsStateStore<T extends State> implements StateStore<T> {
    * See {@link StateStore#put(String, String, T)}.
    *
    * <p>
-   *   This implementation does not support putting the state object into an existing store as
-   *   append is to be supported by the Hadoop SequenceFile (HADOOP-7139).
+   *   An existing table is replaced with the new state. A temporary file is used when the
+   *   filesystem supports atomic renames, and stale temporary files from failed attempts are
+   *   cleaned up before writing.
    * </p>
    */
   @Override
   public void put(String storeName, String tableName, T state) throws IOException {
     String tmpTableName = this.useTmpFileForPut ? TMP_FILE_PREFIX + tableName : tableName;
     Path tmpTablePath = new Path(new Path(this.storeRootDir, storeName), tmpTableName);
+
+    // A previous attempt may have crashed before committing or cleaning up its temporary file.
+    // Never append to, or rename, a stale partial file.
+    deleteTmpTableIfExists(storeName, tmpTableName);
 
     if (!this.fs.exists(tmpTablePath) && !create(storeName, tmpTableName)) {
       throw new IOException("Failed to create a state file for table " + tmpTableName);
@@ -168,6 +173,7 @@ public class FsStateStore<T extends State> implements StateStore<T> {
           Text.class, this.stateClass, SequenceFile.CompressionType.BLOCK, new DefaultCodec()));
       writer.append(new Text(Strings.nullToEmpty(state.getId())), state);
     } catch (Throwable t) {
+      deleteTmpTableIfExists(storeName, tmpTableName);
       throw closer.rethrow(t);
     } finally {
       closer.close();
@@ -183,14 +189,19 @@ public class FsStateStore<T extends State> implements StateStore<T> {
    * See {@link StateStore#putAll(String, String, Collection)}.
    *
    * <p>
-   *   This implementation does not support putting the state objects into an existing store as
-   *   append is to be supported by the Hadoop SequenceFile (HADOOP-7139).
+   *   An existing table is replaced with the new states. A temporary file is used when the
+   *   filesystem supports atomic renames, and stale temporary files from failed attempts are
+   *   cleaned up before writing.
    * </p>
    */
   @Override
   public void putAll(String storeName, String tableName, Collection<T> states) throws IOException {
     String tmpTableName = this.useTmpFileForPut ? TMP_FILE_PREFIX + tableName : tableName;
     Path tmpTablePath = new Path(new Path(this.storeRootDir, storeName), tmpTableName);
+
+    // A previous attempt may have crashed before committing or cleaning up its temporary file.
+    // Never append to, or rename, a stale partial file.
+    deleteTmpTableIfExists(storeName, tmpTableName);
 
     if (!this.fs.exists(tmpTablePath) && !create(storeName, tmpTableName)) {
       throw new IOException("Failed to create a state file for table " + tmpTableName);
@@ -205,6 +216,7 @@ public class FsStateStore<T extends State> implements StateStore<T> {
         writer.append(new Text(Strings.nullToEmpty(state.getId())), state);
       }
     } catch (Throwable t) {
+      deleteTmpTableIfExists(storeName, tmpTableName);
       throw closer.rethrow(t);
     } finally {
       closer.close();
@@ -216,8 +228,17 @@ public class FsStateStore<T extends State> implements StateStore<T> {
     }
   }
 
+  private void deleteTmpTableIfExists(String storeName, String tmpTableName) throws IOException {
+    if (tmpTableName.startsWith(TMP_FILE_PREFIX)) {
+      Path tmpTablePath = new Path(new Path(this.storeRootDir, storeName), tmpTableName);
+      if (this.fs.exists(tmpTablePath)) {
+        this.fs.delete(tmpTablePath, false);
+      }
+    }
+  }
+
   protected void renamePath(Path tmpTablePath, Path tablePath) throws IOException {
-    HadoopUtils.renamePath(this.fs, tmpTablePath, tablePath);
+    HadoopUtils.renamePath(this.fs, tmpTablePath, tablePath, true);
   }
 
   @Override
@@ -300,6 +321,10 @@ public class FsStateStore<T extends State> implements StateStore<T> {
     }
 
     for (FileStatus status : this.fs.listStatus(storePath)) {
+      // Temporary files are not committed tables and may be partially written.
+      if (status.getPath().getName().startsWith(TMP_FILE_PREFIX)) {
+        continue;
+      }
       states.addAll(getAll(storeName, status.getPath().getName()));
     }
 
@@ -316,8 +341,9 @@ public class FsStateStore<T extends State> implements StateStore<T> {
     }
 
     for (FileStatus status : this.fs.listStatus(storePath)) {
-      if (predicate.apply(status.getPath().getName())) {
-        names.add(status.getPath().getName());
+      String tableName = status.getPath().getName();
+      if (!tableName.startsWith(TMP_FILE_PREFIX) && predicate.apply(tableName)) {
+        names.add(tableName);
       }
     }
 

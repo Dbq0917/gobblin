@@ -55,37 +55,42 @@ public class TrackerBasedWatermarkManager implements WatermarkManager {
       Runnable() {
         @Override
         public void run() {
-          long startTime = System.nanoTime();
-          Map<String, CheckpointableWatermark> watermarksToCommit = null;
           try {
-            _retrievalStatus.onAttempt();
-            watermarksToCommit = _watermarkTracker.getCommittableWatermarks();
-            _logger.debug("Retrieved watermark {}", watermarksToCommit);
-            _retrievalStatus.onSuccess(watermarksToCommit);
-          }
-          catch (Exception e) {
-            _retrievalStatus.onFailure(e);
-            _logger.error("Failed to get watermark", e);
-          }
-          // Prevent multiple commits concurrently
-          synchronized (this) {
-            if (watermarksToCommit != null && !watermarksToCommit.isEmpty()) {
-              try {
-                _commitStatus.onAttempt();
-                _logger.info("Will commit watermark {}", watermarksToCommit.toString());
-                //TODO: Not checking if this watermark has already been committed successfully.
-                _watermarkStorage.commitWatermarks(watermarksToCommit.values());
-                _commitStatus.onSuccess(watermarksToCommit);
-              } catch (Exception e) {
-                _commitStatus.onFailure(e, watermarksToCommit);
-                _logger.error("Failed to write watermark", e);
-              }
-            } else {
-              _logger.info("Nothing to commit");
+            long startTime = System.nanoTime();
+            Map<String, CheckpointableWatermark> watermarksToCommit = null;
+            try {
+              _retrievalStatus.onAttempt();
+              watermarksToCommit = _watermarkTracker.getCommittableWatermarks();
+              _logger.debug("Retrieved watermark {}", watermarksToCommit);
+              _retrievalStatus.onSuccess(watermarksToCommit);
             }
+            catch (Exception e) {
+              _retrievalStatus.onFailure(e);
+              _logger.error("Failed to get watermark", e);
+            }
+            // Prevent multiple commits concurrently
+            synchronized (this) {
+              if (watermarksToCommit != null && !watermarksToCommit.isEmpty()) {
+                try {
+                  _commitStatus.onAttempt();
+                  _logger.info("Will commit watermark {}", watermarksToCommit.toString());
+                  _watermarkStorage.commitWatermarks(watermarksToCommit.values());
+                  _commitStatus.onSuccess(watermarksToCommit);
+                } catch (Exception e) {
+                  _commitStatus.onFailure(e, watermarksToCommit);
+                  _logger.error("Failed to write watermark", e);
+                }
+              } else {
+                _logger.info("Nothing to commit");
+              }
+            }
+            long duration = (System.nanoTime() - startTime)/1000000;
+            _logger.info("Duration of run {} milliseconds", duration);
+          } catch (Throwable t) {
+            // ScheduledExecutorService silently suppresses future runs when a periodic task throws.
+            // Contain unexpected failures here so a transient error cannot permanently stop commits.
+            _logger.error("Watermark committer encountered an unexpected error; will retry on the next run", t);
           }
-          long duration = (System.nanoTime() - startTime)/1000000;
-          _logger.info("Duration of run {} milliseconds", duration);
         }
       };
 

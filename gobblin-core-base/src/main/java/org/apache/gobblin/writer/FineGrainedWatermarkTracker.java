@@ -117,7 +117,13 @@ public class FineGrainedWatermarkTracker implements Instrumentable, Closeable {
     _sweeper = new Runnable() {
       @Override
       public void run() {
-        sweep();
+        try {
+          sweep();
+        } catch (Throwable t) {
+          // A periodic task that throws is silently cancelled by the executor. Keep the sweeper
+          // alive so watermark tracking can recover from a transient failure.
+          log.error("Watermark sweeper encountered an unexpected error; will retry on the next run", t);
+        }
       }
     };
 
@@ -125,7 +131,13 @@ public class FineGrainedWatermarkTracker implements Instrumentable, Closeable {
     _stabilityChecker = new Runnable() {
       @Override
       public void run() {
-        checkStability();
+        try {
+          checkStability();
+        } catch (Throwable t) {
+          // A periodic task that throws is silently cancelled by the executor. Keep the stability
+          // checker alive so tracking can continue to enforce its lag bound.
+          log.error("Watermark stability checker encountered an unexpected error; will retry on the next run", t);
+        }
       }
     };
 

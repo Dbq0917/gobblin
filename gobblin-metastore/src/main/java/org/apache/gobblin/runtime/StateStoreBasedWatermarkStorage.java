@@ -111,12 +111,48 @@ public class StateStoreBasedWatermarkStorage implements WatermarkStorage {
   }
 
   @Override
-  public void commitWatermarks(Iterable<CheckpointableWatermark> watermarks)
+  public synchronized void commitWatermarks(Iterable<CheckpointableWatermark> watermarks)
       throws IOException {
     for (CheckpointableWatermark watermark: watermarks) {
       String tableName = watermark.getSource();
+      CheckpointableWatermark committedWatermark = getCommittedWatermark(watermark, tableName);
+      if (committedWatermark != null) {
+        int comparison = watermark.compareTo(committedWatermark);
+        if (comparison == 0) {
+          // The same checkpoint was already persisted, e.g. by a retried or duplicate attempt.
+          log.info("Watermark {} for table {} is already committed; skipping", watermark.getWatermark(), tableName);
+          continue;
+        } else if (comparison < 0) {
+          // Never let a stale attempt move a checkpoint backwards and cause duplicate extraction.
+          log.warn("Ignoring watermark {} for table {} because committed watermark {} is ahead",
+              watermark.getWatermark(), tableName, committedWatermark.getWatermark());
+          continue;
+        }
+      }
       _stateStore.put(_storeName, tableName, new CheckpointableWatermarkState(watermark, GSON));
       log.info("Committed watermark {} for table {}", watermark.getWatermark().toString(), tableName);
+    }
+  }
+
+  /**
+   * Read the current checkpoint using the concrete class of the watermark being committed. If the
+   * checkpoint is missing or corrupt, return null so the new watermark can repair it.
+   */
+  private CheckpointableWatermark getCommittedWatermark(CheckpointableWatermark newWatermark, String tableName) {
+    try {
+      CheckpointableWatermarkState committedState = _stateStore.get(_storeName, tableName, tableName);
+      if (committedState == null) {
+        return null;
+      }
+      String serialized = committedState.getProp(tableName);
+      if (serialized == null) {
+        return null;
+      }
+      return GSON.fromJson(serialized, newWatermark.getClass());
+    } catch (Exception e) {
+      log.warn("Failed to read committed watermark for table {}; overwriting it with the new checkpoint",
+          tableName, e);
+      return null;
     }
   }
 

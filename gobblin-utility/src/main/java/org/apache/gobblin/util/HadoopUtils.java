@@ -308,6 +308,10 @@ public class HadoopUtils {
       if (fs.exists(newName)) {
         if (overwrite) {
           HadoopUtils.moveToTrash(fs, newName, conf);
+          // moveToTrash is a no-op when the filesystem has no trash configured.
+          if (fs.exists(newName)) {
+            fs.delete(newName, false);
+          }
         } else {
           throw new FileAlreadyExistsException(String.format("Failed to rename %s to %s: dst already exists", oldName, newName));
         }
